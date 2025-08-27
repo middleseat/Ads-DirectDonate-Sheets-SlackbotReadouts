@@ -1,6 +1,6 @@
 /**
  * Slack Bot for Google Sheets Readout
- * Version: 3.0.2
+ * Version: 3.1.0
  * Author: Ryan Mioduski
  *
  * Important:
@@ -21,6 +21,7 @@ const SLACK_THREAD_URL = ''; // Optional: Update this with your thread URL if yo
 const NOTES_RANGE = 'E43:E'; // Optional: Update this with your notes range
 const COPY_RANGE = 'B14:U17'; // Optional: Update this with your copy range
 const PASTE_RANGE = 'B26:U29'; // Optional: Update this with your paste range
+const SHEET_NAME = 'Readouts'; // The name of the sheet to use for all operations
 // End Configuration
 
 function onOpen() {
@@ -33,7 +34,13 @@ function onOpen() {
 function getNotes() {
   if (!NOTES_RANGE) return []; // Return an empty array if NOTES_RANGE is not configured
 
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = spreadsheet.getSheetByName(SHEET_NAME);
+  if (!sheet) {
+    console.error(`Sheet "${SHEET_NAME}" not found.`);
+    return [];
+  }
+  
   const notesRange = sheet.getRange(NOTES_RANGE);
   const notesValues = notesRange.getValues();
   
@@ -42,7 +49,7 @@ function getNotes() {
 
   // Filter out empty rows, change rows with only "#N/A", and format notes
   const notes = notesValues
-    .filter(note => note[0].trim() !== '') // Remove empty notes
+    .filter(note => note[0] && typeof note[0] === 'string' && note[0].trim() !== '') // Check if note[0] is a string and not empty
     .map(note => {
       const noteText = note[0].trim();
       // Check if the note is "#N/A"
@@ -62,8 +69,13 @@ function getNotes() {
 }
 
 function getSheetData() {
-    console.log("Fetching active sheet data");
-    const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+    console.log("Fetching sheet data from " + SHEET_NAME);
+    const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = spreadsheet.getSheetByName(SHEET_NAME);
+    if (!sheet) {
+      console.error(`Sheet "${SHEET_NAME}" not found.`);
+      return [];
+    }
   
     // Dynamically calculate the range based on DATA_RANGE_START
     const lastRow = sheet.getLastRow();
@@ -333,7 +345,13 @@ function copyPasteValues() {
   }
 
   try {
-    const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+    const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = spreadsheet.getSheetByName(SHEET_NAME);
+    if (!sheet) {
+      console.error(`Sheet "${SHEET_NAME}" not found.`);
+      return false;
+    }
+    
     const sourceRange = sheet.getRange(COPY_RANGE);
     const targetRange = sheet.getRange(PASTE_RANGE);
 
