@@ -1,6 +1,6 @@
 /**
  * Slack Bot for Google Sheets Readout
- * Version: 3.1.0
+ * Version: 3.2.0
  * Author: Ryan Mioduski
  *
  * Important:
@@ -22,6 +22,9 @@ const NOTES_RANGE = 'E43:E'; // Optional: Update this with your notes range
 const COPY_RANGE = 'B14:U17'; // Optional: Update this with your copy range
 const PASTE_RANGE = 'B26:U29'; // Optional: Update this with your paste range
 const SHEET_NAME = 'Readouts'; // The name of the sheet to use for all operations
+// Canvas Configuration (optional)
+const CANVAS_URL = 'https://middleseat.slack.com/docs/T250LF79S/F09CA4C66TX'; // Optional: Slack Canvas URL to update
+const CANVAS_TITLE = 'Readouts Canvas'; // Optional: for logging/reference
 // End Configuration
 
 function onOpen() {
@@ -141,6 +144,74 @@ function getSheetData() {
     return (parseFloat(value) * 100).toFixed(2) + '%';
   }
 
+// Build Markdown for Slack Canvas based on existing notes/data formatting
+function buildCanvasMarkdown(notes, data, documentTitle, formattedDate) {
+  const now = new Date();
+  const dateTimeStr = Utilities.formatDate(now, Session.getScriptTimeZone(), 'MMM d, yyyy h:mm a');
+
+  let markdown = `# ${documentTitle} Readout – ${formattedDate}\n\n`;
+
+  if (notes && notes.length > 0) {
+    markdown += '## Notes\n\n';
+    notes.forEach(n => {
+      markdown += `* ${n}\n`;
+    });
+    markdown += '\n';
+  }
+
+  let sinceLastUpdateFlag = false;
+  let currentCampaign = '';
+  let hasAnyCampaign = false;
+
+  data.forEach((row, index) => {
+    const label = (row[0] || '').toString();
+    let value = row[1];
+
+    // New campaign header
+    if (label.startsWith('*') && label.endsWith('*')) {
+      if (currentCampaign !== '') {
+        markdown += '\n';
+      }
+      currentCampaign = label.slice(1, -1);
+      markdown += `## ${currentCampaign}\n`;
+      hasAnyCampaign = true;
+      sinceLastUpdateFlag = false;
+      return;
+    }
+
+    // Format value
+    let formattedValue = value;
+    if (label.includes('Spent') || label.includes('Raised')) {
+      formattedValue = formatCurrency(value);
+    } else if (label.includes('Donations')) {
+      formattedValue = formatNumber(value);
+    } else if (label.includes('ROI')) {
+      formattedValue = formatPercentage(value);
+    }
+
+    if (label.startsWith('> *Since Last Update*')) {
+      markdown += `\n> *Since Last Update*\n`;
+      sinceLastUpdateFlag = true;
+    } else if (sinceLastUpdateFlag) {
+      const rowData = label.startsWith('>') ? label.slice(1).trim() : label.trim();
+      markdown += `> ${rowData}: ${formattedValue}\n`;
+    } else if (label.trim() !== '') {
+      markdown += `- ${label.trim()}: ${formattedValue}\n`;
+    }
+
+    if (index === data.length - 1) {
+      markdown += '\n';
+    }
+  });
+
+  if (!hasAnyCampaign) {
+    markdown += '_No campaign data available._\n\n';
+  }
+
+  markdown += `\n_Last updated: ${dateTimeStr}_`;
+  return markdown;
+}
+
 function formatDataForSlack(data) {
   const blocks = []; // Initialize an array to hold all blocks
   let currentCampaignText = "";
@@ -206,6 +277,99 @@ function formatDataForSlack(data) {
   });
 
   return blocks;
+}
+
+// Extract Canvas File ID (starts with F...) from Slack docs URL
+function extractCanvasIdFromUrl(url) {
+  if (!url) return null;
+  try {
+    const match = url.match(/\/docs\/[^/]+\/(F[0-9A-Z]+)/);
+    return match ? match[1] : null;
+  } catch (e) {
+    console.log('Failed to extract canvas id from URL: ' + e);
+    return null;
+  }
+}
+
+// Update an existing Slack Canvas by ID with markdown content
+function updateExistingCanvasById(canvasId, markdown, token) {
+  if (!canvasId) {
+    console.log('No canvasId provided; skipping canvas update.');
+    return false;
+  }
+  const payload = {
+    canvas_id: canvasId,
+    changes: [
+      {
+        operation: 'replace',
+        document_content: {
+          type: 'markdown',
+          markdown: markdown
+        }
+      }
+    ]
+  };
+
+  const options = {
+    method: 'post',
+    contentType: 'application/json',
+    headers: {
+      'Authorization': 'Bearer ' + token
+    },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+
+  try {
+    const response = UrlFetchApp.fetch('https://slack.com/api/canvases.edit', options);
+    const result = JSON.parse(response.getContentText());
+    console.log('canvases.edit response: ' + JSON.stringify(result));
+    return !!result.ok;
+  } catch (e) {
+    console.log('Exception calling canvases.edit: ' + e.toString());
+    return false;
+  }
+}
+
+// Fetch permalink for a Canvas (file)
+function getCanvasPermalink(canvasId, token) {
+  try {
+    const options = {
+      method: 'get',
+      contentType: 'application/x-www-form-urlencoded',
+      headers: {
+        'Authorization': 'Bearer ' + token
+      },
+      muteHttpExceptions: true
+    };
+    const response = UrlFetchApp.fetch('https://slack.com/api/files.info?file=' + encodeURIComponent(canvasId), options);
+    const result = JSON.parse(response.getContentText());
+    if (result.ok && result.file && result.file.permalink) {
+      return result.file.permalink;
+    }
+    console.log('files.info did not return permalink: ' + JSON.stringify(result));
+    return null;
+  } catch (e) {
+    console.log('Exception calling files.info: ' + e.toString());
+    return null;
+  }
+}
+
+// Update Canvas (if configured) and return permalink when available
+function updateCanvasIfConfigured(notes, data, documentTitle, formattedDate) {
+  if (!CANVAS_URL) {
+    return { attempted: false, success: false, permalink: null };
+  }
+  const token = PropertiesService.getScriptProperties().getProperty('SLACK_OAUTH_TOKEN');
+  const canvasId = extractCanvasIdFromUrl(CANVAS_URL);
+  if (!canvasId) {
+    console.log('Could not extract Canvas ID from CANVAS_URL.');
+    return { attempted: true, success: false, permalink: null };
+  }
+  const markdown = buildCanvasMarkdown(notes, data, documentTitle, formattedDate);
+  const updated = updateExistingCanvasById(canvasId, markdown, token);
+  const permalink = updated ? getCanvasPermalink(canvasId, token) : null;
+  return { attempted: true, success: updated, permalink: permalink };
 }
 
 function sendSlackMessage() {
@@ -313,6 +477,13 @@ function sendSlackMessage() {
   if (!responseJson.ok) {
     console.error(`Failed to send message to Slack: ${responseJson.error}`);
     slackMessageSuccess = false;
+  }
+
+  // Update Slack Canvas after attempting to send the channel message (non-blocking)
+  try {
+    updateCanvasIfConfigured(notes, data, documentTitle, formattedDate);
+  } catch (e) {
+    console.log('Canvas update threw (ignored): ' + e.toString());
   }
 
   // Perform copy-paste operation only if the Slack message was successfully sent
