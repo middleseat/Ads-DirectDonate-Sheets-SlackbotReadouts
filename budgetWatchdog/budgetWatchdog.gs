@@ -1,6 +1,6 @@
 /**
  * Budget Watchdog for Google Sheets
- * Version: 1.1.0
+ * Version: 1.2.0
  * Author: Ryan Mioduski
  *
  * Monitors the FB_data tab for campaigns that are close to — or already past —
@@ -36,6 +36,7 @@ const WATCHDOG_RUN_TIMES = [ // Daily run schedule (24-hour clock)
 
 const WATCHDOG_TRIGGER_HANDLER = 'runBudgetWatchdog';
 const WATCHDOG_COLUMN_COUNT = 11; // AE through AO
+const WATCHDOG_WARNED_TODAY_KEY = 'WATCHDOG_WARNED_TODAY'; // Script property holding the campaigns already warned about today
 
 // Offsets within the AE:AO block
 const WATCHDOG_COL = {
@@ -62,22 +63,30 @@ function runBudgetWatchdog() {
   const alerts = getWatchdogAlerts();
   console.log(`Flagged campaigns: ${alerts.length}`);
 
-  if (alerts.length === 0) {
-    console.log('Nothing flagged. Skipping Slack message.');
+  const toPost = dropWarningsAlreadySentToday(alerts);
+  if (toPost.length === 0) {
+    console.log('Nothing new to report. Skipping Slack message.');
     return;
   }
 
-  const posted = postWatchdogToSlack(alerts);
+  const posted = postWatchdogToSlack(toPost);
+  if (posted) {
+    // Only after the message lands — recording a warning we failed to send would
+    // silence it for the rest of the day.
+    recordWatchdogWarningsSent(toPost);
+  }
   console.log(posted ? 'Budget Watchdog message sent.' : 'Budget Watchdog message failed. See logs above.');
 }
 
 /**
  * Logs what would be sent without posting to Slack. Handy for verifying setup.
+ * Applies the same once-a-day filter as a real run, so what you see here is what
+ * the next run would actually post. Reading the filter does not update it.
  */
 function previewBudgetWatchdog() {
-  const alerts = getWatchdogAlerts();
+  const alerts = dropWarningsAlreadySentToday(getWatchdogAlerts());
   if (alerts.length === 0) {
-    console.log('No campaigns are currently flagged in column AL.');
+    console.log('Nothing would be sent — either no campaigns are flagged in column AL, or every warning has already gone out today.');
     return;
   }
 
@@ -85,6 +94,89 @@ function previewBudgetWatchdog() {
     console.log(`[${alert.severity}] ${alert.emoji} ${alert.message}`);
     console.log(`         ${alert.detail}`);
   });
+}
+
+/**
+ * Drops 10%-of-cap warnings that already went out today.
+ *
+ * The spend cap (column AH) only refreshes once a day while spend updates hourly and
+ * this script runs four times a day, so a campaign sitting in the warning band gets
+ * flagged again on every run until the cap catches up — three or four identical Slack
+ * messages before anything changes. One warning per campaign per day is enough; the
+ * next day's cap refresh clears the slate.
+ *
+ * Out-of-budget alerts are deliberately left alone. Those are worth repeating, and the
+ * stale-cap check in getWatchdogAlerts() already suppresses the false ones.
+ */
+function dropWarningsAlreadySentToday(alerts) {
+  const warned = readWatchdogWarnedToday();
+  if (warned.length === 0) return alerts;
+
+  const suppressed = [];
+  const kept = alerts.filter(alert => {
+    if (alert.severity !== 'warning') return true;
+    if (warned.indexOf(alert.campaign) === -1) return true;
+    suppressed.push(alert.campaign);
+    return false;
+  });
+
+  // Never suppress silently — the campaign should still be findable in the log.
+  if (suppressed.length > 0) {
+    console.log(`Suppressed ${suppressed.length} warning(s) already sent today: ${suppressed.join(', ')}`);
+  }
+
+  return kept;
+}
+
+/**
+ * Adds the warnings in this message to today's list.
+ */
+function recordWatchdogWarningsSent(alerts) {
+  const warned = readWatchdogWarnedToday();
+
+  alerts.forEach(alert => {
+    if (alert.severity === 'warning' && warned.indexOf(alert.campaign) === -1) {
+      warned.push(alert.campaign);
+    }
+  });
+
+  const state = { date: watchdogToday(), campaigns: warned };
+
+  try {
+    PropertiesService.getScriptProperties().setProperty(WATCHDOG_WARNED_TODAY_KEY, JSON.stringify(state));
+  } catch (error) {
+    // The message is already out. Failing here at worst repeats a warning on the next
+    // run, which is not worth turning a delivered alert into a failed execution.
+    console.warn(`Could not record today's warnings (${error}). They may be sent again on the next run.`);
+  }
+}
+
+/**
+ * The campaigns already warned about today. Anything stored under a previous date is
+ * dropped, so the list resets itself on the first run of each day with no cleanup.
+ */
+function readWatchdogWarnedToday() {
+  const raw = PropertiesService.getScriptProperties().getProperty(WATCHDOG_WARNED_TODAY_KEY);
+  if (!raw) return [];
+
+  try {
+    const state = JSON.parse(raw);
+    if (state.date !== watchdogToday()) return [];
+    return state.campaigns || [];
+  } catch (error) {
+    // A warning sent twice beats a warning never sent, so fall back to sending.
+    console.warn(`Could not read ${WATCHDOG_WARNED_TODAY_KEY} (${error}). Treating today as unwarned.`);
+    return [];
+  }
+}
+
+/**
+ * Clears today's warning history so the next run re-sends every 10% warning.
+ * For testing — a normal day resets on its own.
+ */
+function resetWatchdogWarnedToday() {
+  PropertiesService.getScriptProperties().deleteProperty(WATCHDOG_WARNED_TODAY_KEY);
+  console.log('Cleared today\'s warning history. The next run will send every flagged warning again.');
 }
 
 /**
@@ -519,4 +611,11 @@ function watchdogFormatTime(time) {
 function watchdogTimestamp() {
   const timezone = WATCHDOG_TIMEZONE || Session.getScriptTimeZone();
   return Utilities.formatDate(new Date(), timezone, 'MMM d, h:mm a');
+}
+
+// Today's date as a plain key. Uses the same timezone as the run schedule so the day
+// rolls over at local midnight rather than UTC.
+function watchdogToday() {
+  const timezone = WATCHDOG_TIMEZONE || Session.getScriptTimeZone();
+  return Utilities.formatDate(new Date(), timezone, 'yyyy-MM-dd');
 }
