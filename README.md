@@ -55,7 +55,31 @@ Before using the bot, you need to configure it with the correct Slack channel ID
 ## Usage
 After configuring the bot, you can trigger the readout to be sent to Slack directly from your Google Sheets document.
 1. **Open the Google Sheets Document:** Ensure you're in the document configured with the bot.
-2. **Send Readout to Slack:** Navigate to the custom menu item Slack Bot > Send Readout to Slack. Clicking this will execute the bot, fetching the data from the specified range, formatting it, and sending it to the configured Slack channel or thread.
+2. **Send Readout to Slack:** Navigate to the custom menu item Slack Bot > Send Readout to Slack. This fetches the data from the specified range and opens a preview of the exact message. Nothing is posted until you approve it.
+
+### Preview and Mid-Refresh Checks
+Every figure in the readout is cumulative, and each "Since Last Update" line is the current pull minus the snapshot in `PASTE_RANGE`. While a data connector is still writing, the current pull comes back partial — spend keeps climbing while raised and donations fall off a cliff, and ROI blows past any real number. The figures still look precise, which is why they get sent by mistake.
+
+The preview shows the message as Slack will render it and flags anything that cannot be a real result:
+
+**Blocks the send** (the Send button stays disabled until you tick "I checked the sheet — send it anyway"):
+- A cell that has not calculated — `#N/A`, `#REF!`, a blank where a number belongs. These post to Slack as `$NaN`.
+- A negative Spent, Raised or Donations figure, in the totals or in a "Since Last Update" line. Running totals only go up, so a negative delta means this pull came back lower than the last snapshot.
+- A "Since Last Update" figure larger than the total it came out of, which means the baseline snapshot is wrong.
+- Money raised with zero donations, or donations with zero money raised.
+- No campaign data in the range at all.
+
+**Flagged but sendable:**
+- ROI below 0% or above `MAX_PLAUSIBLE_ROI` (default 1000%).
+- Zero spend on a campaign that is reporting results.
+- Every "Since Last Update" figure at exactly zero, which usually means the readout already went out today.
+- A note in `NOTES_RANGE` that has not calculated.
+
+The message is built from the rows the preview was built from, so a refresh landing between the preview and the click cannot change what you approved. Set `PREVIEW_BEFORE_SENDING = false` to go back to sending immediately. Time-based triggers and runs from the Apps Script editor skip the preview automatically, since there is no spreadsheet UI to open a dialog in.
+
+A successful send takes over the dialog with a check mark, a short confetti burst and a summary of what happened — how many campaigns posted, where, and that the baseline has been reset — then closes itself. The animation respects the operating system's reduce-motion setting.
+
+If the message posts but the copy-paste step fails, the dialog says so and stays put rather than closing, and the Send button stays disabled — the readout is already in the channel, so a second click would post the whole thing twice.
 
 ### Including Notes in Your Readout
 If you have configured a `NOTES_RANGE`, the script will fetch each note from this range and include it at the top of your Slack message. Notes starting with an emoji pattern (`:word:`) will retain their custom emoji. Otherwise, notes will be prefixed with a :warning: emoji to highlight them.
@@ -70,3 +94,8 @@ To ensure your message correctly threads in Slack, your `SLACK_THREAD_URL` must 
 
 ### Copy and Paste Ranges
 If you have configured `COPY_RANGE` and `PASTE_RANGE` in the configuration, the script will automatically copy data from the `COPY_RANGE` and paste it into the `PASTE_RANGE` before sending the readout.
+
+## Companion Script: Budget Watchdog
+`budgetWatchdog/budgetWatchdog.gs` is a separate script with its own version number and configuration. Where the readout bot reports when someone asks it to, the watchdog runs on a schedule and posts when a campaign is close to — or already past — its spend cap, so nobody has to open the sheet to catch it. It shares only the `SLACK_OAUTH_TOKEN` script property with the readout bot.
+
+It needs the Sheets advanced service enabled and `installWatchdogTriggers()` run once, and it adds a trigger authorization scope to the project. Setup, the `AE:AO` sheet layout it expects, and troubleshooting are in [documentation/budgetWatchdog.md](documentation/budgetWatchdog.md).

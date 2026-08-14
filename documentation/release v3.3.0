@@ -1,0 +1,92 @@
+# Release Notes for Version 3.3.0
+
+Everything that changed since 3.0.1, the last documented release.
+
+## Major Updates
+
+- **Preview Before Sending:** Slack Bot > Send Readout to Slack no longer posts. It opens a preview of the exact message and posts nothing until you approve it. The message is built from the rows the preview was built from, so a data refresh landing between the preview and the click cannot change what you approved.
+- **Mid-Refresh Checks:** The preview flags figures that cannot be real results. Every figure in the readout is cumulative, and each "Since Last Update" line is the current pull minus the snapshot in `PASTE_RANGE`. While a connector is still writing, the current pull comes back partial — spend keeps climbing while raised and donations fall off a cliff, and ROI blows past any real number. The figures still look precise, which is why they were getting sent by mistake.
+
+## What the Checks Catch
+
+**Blocks the send.** The Send button stays disabled until you tick "I checked the sheet — send it anyway":
+
+- A cell that has not calculated — `#N/A`, `#REF!`, `#DIV/0!`, or a blank where a number belongs. These post to Slack as `$NaN`.
+- A negative Spent, Raised or Donations figure, in the totals or in a "Since Last Update" line. Running totals only go up, so a negative delta means the current pull came back lower than the last snapshot.
+- A "Since Last Update" figure larger than the total it came out of, which means the baseline snapshot is wrong.
+- Money raised with zero donations, or donations with zero money raised.
+- No campaign data in the configured range at all.
+
+**Flagged but sendable:**
+
+- ROI below 0% or above `MAX_PLAUSIBLE_ROI` (default 1000%).
+- Zero spend on a campaign that is reporting results.
+- Every "Since Last Update" figure at exactly zero, which usually means the readout already went out today.
+- A note in `NOTES_RANGE` that has not calculated.
+
+## New Features
+
+- **Success Screen:** A completed send takes over the dialog with a check mark, a short confetti burst, and a summary of what actually happened — how many campaigns posted, where, and that the baseline has been reset — then closes itself. The animation respects the operating system's reduce-motion setting.
+- **Slack Canvas Support (3.2.0):** Set `CANVAS_URL` to a Slack Canvas and each readout replaces its contents with the same figures in Markdown, timestamped. Leave it blank to skip the canvas entirely. Runs after the channel message and never blocks it — a canvas failure is logged, not raised.
+- **Readouts Tab (3.1.0):** Added `SHEET_NAME`. Every operation — notes, data, copy-paste — now reads the named tab instead of whichever tab happened to be active, so a readout sent from the wrong tab is no longer possible. A missing tab is logged and returns empty rather than throwing.
+
+## Enhancements
+
+- **No Double Posting (3.3.0):** If the message posts but the copy-paste step fails, the dialog says so and stays put, and the Send button stays disabled. Previously that outcome re-enabled the button, and a second click would post the whole readout to the channel twice.
+- **Slack Failures Report Instead of Throwing (3.3.0):** A network failure on `chat.postMessage` is now caught and reported in the dialog rather than surfacing as an unhandled script error.
+- **Copy-Paste Only on Success (3.0.2):** The baseline copy from `COPY_RANGE` into `PASTE_RANGE` runs only when the Slack message actually posted. A failed send no longer resets the baseline, which used to leave the next readout's "Since Last Update" figures wrong.
+- **Visible Note Errors (3.0.2):** A note that comes through as `#N/A` posts as "Error fetching note" instead of being silently dropped. As of 3.3.0 the preview also flags it before it goes out.
+
+## Configuration
+
+New constants since 3.0.1, all at the top of `googleAppsScriptCode.gs`:
+
+| Constant | Added | Default | Purpose |
+| --- | --- | --- | --- |
+| `SHEET_NAME` | 3.1.0 | `'Readouts'` | The tab every operation reads and writes |
+| `CANVAS_URL` | 3.2.0 | `''` | Slack Canvas to update. Blank skips the canvas |
+| `CANVAS_TITLE` | 3.2.0 | `'Readouts Canvas'` | Name used in logs and on the success screen |
+| `PREVIEW_BEFORE_SENDING` | 3.3.0 | `true` | Set to `false` to go back to sending immediately |
+| `MAX_PLAUSIBLE_ROI` | 3.3.0 | `10` | ROI above this (10 = 1000%) is flagged. Raise it if your tracker genuinely reports higher |
+
+## Upgrading from 3.0.x
+
+1. Replace the contents of `googleAppsScriptCode.gs` with the 3.3.0 version.
+2. Set `SHEET_NAME` to the tab holding your readout block if it is not called `Readouts`.
+3. Optionally set `CANVAS_URL`. If you do, your Slack app needs the `canvases:write` and `files:read` scopes — without them the canvas update fails quietly and only the channel message goes out.
+4. Send a readout. The preview opens; nothing posts until you approve it.
+
+No new OAuth scopes are needed for the preview itself, so an existing installation will not re-prompt for authorization. There is also no extra file to create: the dialog's HTML is generated inside `googleAppsScriptCode.gs`, so the script is still a single file to paste.
+
+## Important Notes
+
+- **The checks assume the standard readout layout** — cumulative totals per campaign, with deltas under a `> *Since Last Update*` row. Labels are matched the same way the Slack formatting matches them (`Spent`, `Raised`, `Donations`, `ROI`). A row the checks do not recognize is still shown in the preview, just not checked, so an unusual layout makes them quiet rather than wrong.
+- **Time-based triggers and runs from the Apps Script editor skip the preview automatically**, since there is no spreadsheet UI to open a dialog in. They send immediately, exactly as before.
+- **The preview is advisory, not a lock.** Every blocking check can be overridden with the checkbox, on purpose — a rule that misfires should not be able to stop a legitimate readout.
+
+---
+
+# New: Budget Watchdog 1.2.0
+
+`budgetWatchdog/budgetWatchdog.gs` is a new script that ships alongside this release. Where the readout bot reports when someone asks it to, the watchdog watches on its own and speaks up when a campaign is close to — or already past — its spend cap. Nobody has to open the sheet.
+
+It is a separate script with its own version number and its own configuration, and it shares exactly one thing with the readout bot: the `SLACK_OAUTH_TOKEN` script property. Full setup, sheet layout and troubleshooting are in `documentation/budgetWatchdog.md`.
+
+## What It Does
+
+- **Runs on a schedule.** Four times a day by default — 9:00, 12:00, 15:00 and 17:30 — set in `WATCHDOG_RUN_TIMES`. Run `installWatchdogTriggers()` once to install them.
+- **Reads the budget block** at `AE:AO` on the `FB_data` tab and alerts on campaigns flagged `Yes` in column AL, sorted most urgent first.
+- **Two severities.** :rotating_light: out of budget, which repeats every run until it changes, and :warning: within 10% of cap, which goes out once per campaign per day so the same campaign does not generate four identical messages.
+- **Stays quiet when there is nothing to say.** No flagged campaigns, or every warning already sent today, means no message at all rather than an empty one.
+- **Shows the numbers behind the alert:** spend against the cap, money and percentage left, and the campaign's status when it is not `ACTIVE`.
+
+## Two Judgment Calls Worth Knowing About
+
+- **Stale caps are filtered out.** The spend cap refreshes once a day while spend updates hourly, so a cap raised this morning leaves the sheet comparing today's spend against yesterday's limit — column AL latches to `Yes` and alerts all day about a campaign with plenty of budget. Campaigns overspent by more than `WATCHDOG_STALE_LIMIT_OVERSPEND` (default $100) are treated as a stale cap rather than a spent-out one and dropped, because a campaign that genuinely runs out lands just past zero. Dropped rows are written to the log, never dropped silently.
+- **It falls back rather than failing.** Money left prefers column AK, then `AH - AJ`, then AG. Alert text prefers column AO, then a headline the script writes itself. A helper column that has not calculated does not cost you the alert.
+
+## Setup Requirements
+
+- **The Sheets advanced service must be enabled** (Apps Script editor > Services > Google Sheets API). This is not optional on a large tracker: `SpreadsheetApp` loads the entire document before returning a single cell, and a document with 100k+ rows on `FB_data` times out on the load itself. The Sheets API fetches only the requested range. Without the service the script falls back with a warning in the log, which works on small documents only.
+- **Adding this script introduces a trigger authorization scope**, so the project will ask you to reauthorize on the first run.
+- **Run `previewBudgetWatchdog()` first.** It logs exactly what a real run would post — same once-a-day filtering — without posting anything or marking anything as sent.
