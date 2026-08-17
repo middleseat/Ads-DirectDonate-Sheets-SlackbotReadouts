@@ -76,13 +76,15 @@ It is a separate script with its own version number and its own configuration, a
 
 - **Runs on a schedule.** Four times a day by default — 9:00, 12:00, 15:00 and 17:30 — set in `WATCHDOG_RUN_TIMES`. Run `installWatchdogTriggers()` once to install them.
 - **Reads the budget block** at `AE:AO` on the `FB_data` tab and alerts on campaigns flagged `Yes` in column AL, sorted most urgent first.
-- **Two severities.** :rotating_light: out of budget, which repeats every run until it changes, and :warning: within 10% of cap, which goes out once per campaign per day so the same campaign does not generate four identical messages.
+- **Two severities, two cadences.** :rotating_light: out of budget repeats every run until it stops being true; :warning: within 10% of cap goes out once per campaign per day. A campaign can raise both flags in the same day.
 - **Stays quiet when there is nothing to say.** No flagged campaigns, or every warning already sent today, means no message at all rather than an empty one.
 - **Shows the numbers behind the alert:** spend against the cap, money and percentage left, and the campaign's status when it is not `ACTIVE`.
 
-## Two Judgment Calls Worth Knowing About
+## Judgment Calls Worth Knowing About
 
-- **Stale caps are filtered out.** The spend cap refreshes once a day while spend updates hourly, so a cap raised this morning leaves the sheet comparing today's spend against yesterday's limit — column AL latches to `Yes` and alerts all day about a campaign with plenty of budget. Campaigns overspent by more than `WATCHDOG_STALE_LIMIT_OVERSPEND` (default $100) are treated as a stale cap rather than a spent-out one and dropped, because a campaign that genuinely runs out lands just past zero. Dropped rows are written to the log, never dropped silently.
+- **The two cadences are not arbitrary.** Meta refreshes a campaign's effective status and spend cap once a day, while spend updates hourly and the watchdog runs four times a day. A 10% warning is therefore a guess the sheet cannot settle — it reports yesterday's cap whether or not somebody has already raised it — so it goes out once per campaign per day. An out-of-budget alert settles itself, so it repeats: if the cap was never raised the campaign stays pinned near the limit and repeating is correct, and if the cap *was* raised, spend climbs past the stale limit, the remainder goes negative, and the stale-cap filter drops the row before it becomes an alert. A negative remainder is the one unambiguous "already fixed" signal, and only a raised cap produces it.
+- **Stale caps are filtered out, and that filter is load-bearing.** Campaigns overspent by more than `WATCHDOG_STALE_LIMIT_OVERSPEND` (default $100) are treated as a raised cap the sheet has not caught up with rather than a spent-out one, because a campaign that genuinely runs out lands just past zero — Meta stops delivery at the cap. Filtering false alarms is half of what it does; the other half is being the detector that makes repeating out-of-budget alerts safe. Dropped rows are written to the log, never dropped silently.
+- **1% of the cap counts as zero.** `WATCHDOG_CRITICAL_PCT_REMAINING` is `0.01`, and the alert says "has hit its budget cap" rather than quoting the percentage. Meta routinely leaves the last few dollars of a cap unspent, so waiting for a true zero means never alerting on a campaign that has already stopped delivering.
 - **It falls back rather than failing.** Money left prefers column AK, then `AH - AJ`, then AG. Alert text prefers column AO, then a headline the script writes itself. A helper column that has not calculated does not cost you the alert.
 
 ## Setup Requirements

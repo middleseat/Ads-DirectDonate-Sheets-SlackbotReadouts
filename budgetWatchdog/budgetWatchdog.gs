@@ -4,7 +4,12 @@
  * Author: Ryan Mioduski
  *
  * Monitors the FB_data tab for campaigns that are close to — or already past —
- * their spend cap and posts an alert to Slack. 
+ * their spend cap and posts an alert to Slack.
+ *
+ * Alert cadence: a 10%-of-cap warning goes out once per campaign per day, while an
+ * out-of-budget alert repeats on every run. That asymmetry is deliberate, and the whole
+ * reasoning lives in dropWarningsAlreadySentToday() — it comes down to what the sheet can
+ * and cannot tell us about a cap that may have been raised since the last run.
  *
  * Important:
  *   1. Enable the Sheets advanced service — Apps Script editor > Services > Sheets.
@@ -23,8 +28,8 @@ const WATCHDOG_SHEET_NAME = 'FB_data'; // The name of the sheet holding the camp
 const WATCHDOG_FIRST_COLUMN = 'AE'; // Left-most column of the watch block (AE:AO)
 const WATCHDOG_FIRST_DATA_ROW = 3; // First row of data (row 2 is the header)
 const WATCHDOG_MAX_ROWS_TO_SCAN = 200; // Safety bound — FB_data runs to 100k+ rows of ad-level data
-const WATCHDOG_CRITICAL_PCT_REMAINING = 0.001; // At or below this share of the cap counts as fully out of budget
-const WATCHDOG_STALE_LIMIT_OVERSPEND = 100; // Overspent by more than this means the spend cap is stale, not spent out — see getWatchdogAlerts()
+const WATCHDOG_CRITICAL_PCT_REMAINING = 0.01; // At or below this share of the cap counts as out of budget, and the alert says exactly that rather than quoting the percentage. Meta often leaves the last few dollars of a cap unspent, so waiting for a true zero means the alert never fires on a campaign that has already stopped delivering
+const WATCHDOG_STALE_LIMIT_OVERSPEND = 100; // Overspent by more than this means the cap was raised and the sheet has not caught up, not that the campaign is spent out — see getWatchdogAlerts()
 const WATCHDOG_TIMEZONE = ''; // Optional: e.g. 'America/New_York'. Blank uses the script's timezone
 const WATCHDOG_RUN_TIMES = [ // Daily run schedule (24-hour clock)
   { hour: 9, minute: 0 },
@@ -99,14 +104,30 @@ function previewBudgetWatchdog() {
 /**
  * Drops 10%-of-cap warnings that already went out today.
  *
- * The spend cap (column AH) only refreshes once a day while spend updates hourly and
- * this script runs four times a day, so a campaign sitting in the warning band gets
- * flagged again on every run until the cap catches up — three or four identical Slack
- * messages before anything changes. One warning per campaign per day is enough; the
- * next day's cap refresh clears the slate.
+ * Meta only refreshes a campaign's effective status and spend cap (column AH) once a day,
+ * while spend updates hourly and this script runs four times a day. So when a campaign is
+ * sitting in the warning band, the script has no way to tell whether someone has already
+ * raised the cap: the sheet reports yesterday's limit either way, and column AL stays
+ * latched to "Yes" until the next refresh. Repeating the warning would just be the same
+ * guess three or four more times. One per campaign per day is enough — the next day's
+ * refresh clears the slate, and the warning fires again if it is still true.
  *
- * Out-of-budget alerts are deliberately left alone. Those are worth repeating, and the
- * stale-cap check in getWatchdogAlerts() already suppresses the false ones.
+ * Out-of-budget alerts are deliberately exempt, because there the sheet does eventually
+ * answer the question:
+ *
+ *   - If the cap was never raised, the campaign stays pinned within
+ *     WATCHDOG_CRITICAL_PCT_REMAINING of the limit. Repeating is correct, because it is
+ *     still out of budget.
+ *   - If the cap *was* raised, spend keeps climbing past the stale limit, the remainder
+ *     turns negative, and the stale-cap check in getWatchdogAlerts() drops the row before
+ *     it ever reaches this function.
+ *
+ * A negative remainder is the one unambiguous signal that someone has already fixed the
+ * budget, and only a raised cap can produce it. That is what makes repeating safe: the
+ * alert stops on its own as soon as it stops being true, without this function having to
+ * guess. Worth knowing about the lag, though — the exemption only kicks in once spend has
+ * passed the stale cap by more than WATCHDOG_STALE_LIMIT_OVERSPEND, so a cap raised this
+ * morning can still produce an alert or two before the overspend shows up.
  */
 function dropWarningsAlreadySentToday(alerts) {
   const warned = readWatchdogWarnedToday();
@@ -183,13 +204,17 @@ function resetWatchdogWarnedToday() {
  * Reads the AE:AO block and returns one alert object per campaign flagged in
  * column AL, sorted most urgent first.
  *
- * Rows whose remainder is deeply negative are dropped. The campaign spending limit
- * (column AH) only refreshes once a day, so a cap raised this morning leaves the sheet
- * comparing today's spend against yesterday's limit — column AL latches to "Yes" and
- * stays there until the next refresh, alerting on every run all day. A campaign that
- * genuinely runs out lands just past zero, because Meta stops delivery at the cap; a
- * hole larger than WATCHDOG_STALE_LIMIT_OVERSPEND means the campaign is spending
+ * Rows whose remainder is deeply negative are dropped, and that check does double duty.
+ * The campaign spending limit (column AH) only refreshes once a day, so a cap raised this
+ * morning leaves the sheet comparing today's spend against yesterday's limit — column AL
+ * latches to "Yes" and stays there until the next refresh, alerting on every run all day.
+ * A campaign that genuinely runs out lands just past zero, because Meta stops delivery at
+ * the cap; a hole larger than WATCHDOG_STALE_LIMIT_OVERSPEND means the campaign is spending
  * against a higher limit the sheet has not picked up yet.
+ *
+ * Because only a raised cap can put a campaign that far past its limit, that same hole is
+ * the signal that the budget has already been fixed — which is what lets out-of-budget
+ * alerts repeat every run without turning into noise. See dropWarningsAlreadySentToday().
  */
 function getWatchdogAlerts() {
   const values = readWatchdogRows();
@@ -359,9 +384,12 @@ function buildWatchdogAlert(row, campaign, rowNumber) {
       ? `${label} has hit its budget cap`
       : `${label} is within 10% of budget cap`;
   } else if (outOfBudget) {
-    // Column AO words every budget flag as "within 10% of budget cap". When the cap
-    // is actually spent out, say that instead — the rest of AO's text (shortname,
-    // end date) carries through untouched.
+    // Column AO words every budget flag as "within 10% of budget cap". When the cap is
+    // spent out, say that instead — the rest of AO's text (shortname, end date) carries
+    // through untouched. This deliberately says "has hit its budget cap" even with 1% of
+    // the cap left rather than quoting the percentage: Meta routinely leaves the last few
+    // dollars unspent, and "within 1% of cap" would read as a near miss on a campaign that
+    // has already stopped delivering.
     message = message
       .replace('is within 10% of budget cap and ending', 'has hit its budget cap, ending')
       .replace('is within 10% of budget cap', 'has hit its budget cap');
